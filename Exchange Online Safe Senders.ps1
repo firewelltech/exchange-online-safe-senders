@@ -104,7 +104,10 @@ finally {
     $connectionTimer.Stop()
 }
 
-# Read safe domains from CSV file
+# Set the transport rule name
+$ruleName = "Firewell Technology Solutions Safe Senders"
+
+# Read the CSV file with the domain safe list
 $csvFilePath = Join-Path $PSScriptRoot "Safe Domains.csv"
 if (-not (Test-Path $csvFilePath)) {
     Write-Log -Message "CSV file 'Safe Domains.csv' not found in the script directory."
@@ -112,6 +115,47 @@ if (-not (Test-Path $csvFilePath)) {
     return
 }
 
+# Retrieve the existing transport rule, if it exists
+$existingRule = Get-TransportRule -Identity $ruleName -ErrorAction SilentlyContinue
+
+if ($existingRule) {
+    # Logging: Existing rule found
+    Write-Log -Message "The transport rule '$ruleName' already exists. Appending domain names if not already present."
+
+    # Retrieve the existing domain names from the rule
+    $existingDomains = $existingRule.SenderDomainIs
+
+    $newDomains = Import-Csv -Path $csvFilePath | Select-Object -ExpandProperty Domain
+    
+    # Filter out the domain names that are already present in the rule
+    $uniqueDomains = $newDomains | Where-Object { $existingDomains -notcontains $_ }
+
+    if ($uniqueDomains) {
+        # Logging: Domain names to be added
+        Write-Log -Message "The following domain names will be added to the transport rule at '$strTenant':"
+        Write-Log -Message $($uniqueDomains -join ', ')
+        Write-Host "The following domain names will be added to the transport rule at '$strTenant':"
+        Write-Host $($uniqueDomains -join ', ')
+
+        # Add the new domain names to the existing rule
+        $existingRule.Conditions.SenderDomainIs += $uniqueDomains
+
+        # Update the rule
+        Set-TransportRule -Identity $existingRule.Identity -Conditions $existingRule.Conditions
+
+        # Logging: Rule updated
+        Write-Log -Message "The transport rule has been updated with the new domain names."
+        Write-Host "The transport rule has been updated with the new domain names."
+    }
+    else {
+        # Logging: No domain names to add
+        Write-Log -Message "No new domain names to add to the transport rule at '$strTenant'."
+        Write-Host "No new domain names to add to the transport rule at '$strTenant'."
+    }
+}
+
+elseif ($null = $existingrule) {
+# Read safe domains from CSV file
 $safeDomains = Import-Csv -Path $csvFilePath | Select-Object -ExpandProperty Domain
 
 if (-not $safeDomains) {
@@ -121,7 +165,6 @@ if (-not $safeDomains) {
 }
 
 # Create the transport rule for safe senders
-$ruleName = "Firewell Technology Solutions Safe Senders List"
 Write-Output "Creating transport rule '$ruleName'..."
 New-TransportRule -Name $ruleName `
     -Comments "Authenticated emails from these domains should never be filtered or blocked" `
@@ -143,3 +186,4 @@ Write-Log -Message "The following domains were added to the Firewell Technology 
 Write-Log -Message $($safeDomains -join ', ')
 Write-Output "The following domains were added to the Firewell Technology Solutions 'Safe Senders' list at '$strTenant':"
 Write-Output $($safeDomains -join ', ')
+}
