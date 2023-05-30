@@ -1,6 +1,32 @@
 ﻿# Set the log file path
 $logFilePath = "$PSScriptRoot\log.txt"
 
+# Check for necessary modules
+# AzureAD
+if (-not (Get-Module -ListAvailable -Name AzureAD)) {
+    Write-Log -Message "The AzureAD module is not installed."
+    try {
+    Install-Module -Name AzureAD -force
+    }
+    catch {
+        Write-Log -Message "Failed to install the AzureAD module. Please install it manually and re-run the script."
+        Write-Host "Failed to install the AzureAD module. Please install it manually and re-run the script."
+        return
+    }
+    Write-Log -Message "The AzureAD module has been installed"
+}
+# ExchangeOnlineManagement
+if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+   try {
+     Install-Module -Name ExchangeOnlineManagement -Force
+   }
+   catch {
+    Write-Log -Message "Failed to install the ExchangeOnlineManagement module. Please install it manually and re-run the script."
+    Write-Host "Failed to install the ExchangeOnlineManagement module. Please install it manually and re-run the script."
+    return
+   }
+}
+
 # Function to write log messages to the log file
 function Write-Log {
     param (
@@ -12,32 +38,6 @@ function Write-Log {
     $logMessage | Out-File -FilePath $logFilePath -Append
 }
 
-# Check if the ExchangeOnlineManagement module is installed
-if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-    # Logging: Module not installed
-    Write-Log -Message "The ExchangeOnlineManagement module is not installed."
-
-    # Prompt the user to install the module
-    $installModule = Read-Host "Do you want to install the ExchangeOnlineManagement module? (Y/N)"
-    if ($installModule -ne 'Y' -and $installModule -ne 'y') {
-        # Logging: Module install cancelled.
-        Write-Log -Message "Module installation cancelled. Exiting the script."
-        return
-    }
-
-    # Install the ExchangeOnlineManagement module
-    try {
-        Write-Log -Message "Installing the ExchangeOnlineManagement module..."
-        Install-Module -Name ExchangeOnlineManagement -Force
-        Write-Log -Message "The ExchangeOnlineManagement module has been installed."
-        Import-Module -Name ExchangeOnlineManagement
-    }
-    catch {
-        Write-Log -Message "Failed to install the ExchangeOnlineManagement module. Please install it manually and re-run the script."
-        Write-Host "Failed to install the ExchangeOnlineManagement module. Please install it manually and re-run the script."
-        return
-    }
-}
 # Prompt the user to enter the Microsoft Tenant Name
 $maxRetryCount = 3
 $retryCount = 0
