@@ -1,60 +1,12 @@
 ﻿# Set the log file path
 $logFilePath = "$PSScriptRoot\log.txt"
-# Set parameters for Connect-ExchangeOnline cmdlet for efficiency (passed to the -CommandName parameter)
 
-# Check for necessary modules
-# AzureAD
-if (-not (Get-Module -ListAvailable -Name AzureAD)) {
-    Write-Log -Message "The AzureAD module is not installed."
-    try {
-    Install-Module -Name AzureAD -force -scope CurrentUser
-    }
-    catch {
-        Write-Log -Message "Failed to install the AzureAD module. Please install it manually and re-run the script."
-        Write-Host "Failed to install the AzureAD module. Please install it manually and re-run the script."
-        return
-    }
-    Write-Log -Message "The AzureAD module has been installed"
-}
-# PartnerCenter
-if (-not (Get-Module -ListAvailable -Name PartnerCenter)) {
-    Write-Log -Message "The PartnerCenter module is not installed."
-    try {
-    Install-Module -Name PartnerCenter -force -scope CurrentUser
-    }
-    catch {
-        Write-Log -Message "Failed to install the PartnerCenter module. Please install it manually and re-run the script."
-        Write-Host "Failed to install the PartnerCenter module. Please install it manually and re-run the script."
-        return
-    }
-    Write-Log -Message "The PartnerCenter module has been installed"
-}
-# ExchangeOnlineManagement
-if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-   try {
-     Install-Module -Name ExchangeOnlineManagement -force -scope CurrentUser
-   }
-   catch {
-    Write-Log -Message "Failed to install the ExchangeOnlineManagement module. Please install it manually and re-run the script."
-    Write-Host "Failed to install the ExchangeOnlineManagement module. Please install it manually and re-run the script."
-    return
-   }
-}
+# Set the transport rule name. Change to suit your needs. The script will check to see if this exact rule exists,
+# and if this rule does not exist, it will create the rule; if the rule does exist, it will overwrite it.
+$ruleName = "Firewell Technology Solutions Safe Senders"
 
-# Microsoft.Identity.Client
-if (-not (Get-Module -ListAvailable -Name Microsoft.Identity.Client)) {
-    Write-Log -Message "The Microsoft.Identity.Client module is not installed."
-    try {
-    Install-Module -Name Microsoft.Identity.Client -force
-    }
-    catch {
-        Write-Log -Message "Failed to install the Microsoft.Identity.Client module. Please install it manually and re-run the script."
-        Write-Host "Failed to install the Microsoft.Identity.Client module. Please install it manually and re-run the script."
-        return
-    }
-    Write-Log -Message "The Microsoft.Identity.Client module has been installed"
-}
-
+# Define custom functions
+# ================================================================================
 # Function to write log messages to the log file
 function Write-Log {
     param (
@@ -66,24 +18,48 @@ function Write-Log {
     $logMessage | Out-File -FilePath $logFilePath -Append -Encoding utf8
 }
 
-# Get user credentials
-$credentials = Get-Credential
-$userName = $credentials.UserName
+# ================================================================================
+# Function to check for required modules and install them if they're not already installed
+function Install-RequiredModules {
+    param (
+        [array]$Modules
+    )
+    foreach ($module in $Modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Write-Log -Message "The $($module) module is not installed."
+            try {
+            Install-Module -Name $module -force -scope CurrentUser -ErrorAction Stop
+            }
+            catch {
+                Write-Log -Message "$($module) failed to install. Please install it manually and re-run the script."
+                Write-Host "$($module) failed to install. Please install it manually and re-run the script."
+                return
+            }
+            Write-Log -Message "$($module) module installed successfully."
+        }
+        else {
+            Write-Log -Message "$($module) already installed."
+        }
+    }
+}
 
+# ================================================================================
+# Function returns a list of tenant domains from Partner Center that have Microsoft 365 or Exchange Online subscriptions
 function Get-PartnerTenants {
     $exchangeOnlineTenants = @()
     # Authenticate with Partner Center credentials
     try {
-            Connect-PartnerCenter
+        Connect-PartnerCenter -ErrorAction Stop
     }
     catch {
-        Write-Log -Message "Failed to connect to Partner Center. Error: $_"
-        Write-Host "Failed to connect to Partner Center. Please check your credentials and try again."
+        $errorCode = "$($_.Exception.HResult): $($_.Exception.ErrorCode)"
+        Write-Log -Message "Failed to connect to Partner Center: $($errorCode)"
+        Write-Host "Failed to connect to Partner Center: $($errorCode)"
         return
     }   
-    # Retrieve the customer tenants associated with the partner account and pipe the domain names
+    # Retrieve the customer tenants associated with the partner account and pipe the Customer ID.
     $customerIDs = Get-PartnerCustomer | Select-Object -ExpandProperty CustomerId
-    # Get customer subscriptions and filter based on product names because we only want to look at tenants that have Exchange Online or Microsoft 365 subscriptions.
+    # Loop through each ID and get customer subscriptions filtered for Exchange Online and Microsoft 365 subscriptions.
     foreach ($id in $customerIDs) {
         $subscriptions = Get-PartnerCustomerSubscribedSku -CustomerId $id
         if ($subscriptions.ProductName -match "Exchange Online|Microsoft 365") {
@@ -112,27 +88,42 @@ function Get-PartnerTenants {
     return $exchangeOnlineTenants
 }
 
+# ================================================================================
+# Main script body starts here
+
+# Install all required modules
+$installModules = "PartnerCenter", "ExchangeOnlineManagement", "AzureAD", "Microsoft.Identity.Client"
+Install-RequiredModules -Modules $installModules
+
 # Import Necessary Modules
 Import-Module PartnerCenter
 Import-Module ExchangeOnlineManagement
 
-# Call the Get-PartnerTenants function to get the domain names of all partner tenants
-# Position 0 in the array (the partner tenant itself) should be omitted from the foreach loop later
-$tenantDomains = Get-PartnerTenants | Where-Object { $_ -like "*.onmicrosoft.com"}
+# Get user credentials for which the username will be used in the Connect-ExchangeOnline cmdlet later.
+$credentials = Get-Credential -Message "Enter your Microsoft Partner username" -ErrorAction Stop
+if (-not $credentials) {
+    Write-Log -Message "User cancelled Get-Credentials"
+    return
+}
+else {
+    $userName = $credentials.UserName
+}
 
 # Read the CSV file with the domain safe list
 $csvFilePath = Join-Path $PSScriptRoot "Safe Domains.csv"
+
+# Make sure the CSV file exists
 if (-not (Test-Path $csvFilePath)) {
     Write-Log -Message "CSV file 'Safe Domains.csv' not found in the script directory."
     Write-Host "CSV file 'Safe Domains.csv' not found in the script directory."
     return
 }
 
-# Set the transport rule name
-$ruleName = "Firewell Technology Solutions Safe Senders"
-
 # Set the domain list bound for the -SenderDomainIs parameter.
 $newSafeDomains = Import-Csv -Path $csvFilePath | Select-Object -ExpandProperty Domain
+
+# Call the Get-PartnerTenants. Only include objects from the partner center that are valid Microsoft tenants.
+$tenantDomains = Get-PartnerTenants | Where-Object { $_ -like "*.onmicrosoft.com"}
 
 foreach ($tenantDomain in $tenantDomains) {
     # Establish ExchangeOnline connection
@@ -146,7 +137,7 @@ foreach ($tenantDomain in $tenantDomains) {
     }
     # Retrieve the existing transport rule, if it exists
     try {
-        $existingRule = Get-TransportRule -Identity $ruleName -ErrorAction SilentlyContinue
+        $existingRule = Get-TransportRule -Identity $ruleName
     }
     catch {
         Write-Log -Message "$($tenantDomain): Get-TransportRule cmdlet failed."
@@ -219,4 +210,4 @@ foreach ($tenantDomain in $tenantDomains) {
     }
 }
 
-Disconnect-ExchangeOnline
+Disconnect-ExchangeOnline -Confirm:$false
