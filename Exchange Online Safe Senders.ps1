@@ -1,14 +1,15 @@
-﻿# Set the log file path
+﻿Set-PSDebug -Trace 0
+
+# Set the log file path
 $logFilePath = "$PSScriptRoot\log.txt"
 # Set parameters for Connect-ExchangeOnline cmdlet for efficiency (passed to the -CommandName parameter)
-$eoCommands = "Connect-ExchangeOnline, Get-TransportRule, Set-TransportRule, New-TransportRule, Disconnect-ExchangeOnline"
 
 # Check for necessary modules
 # AzureAD
 if (-not (Get-Module -ListAvailable -Name AzureAD)) {
     Write-Log -Message "The AzureAD module is not installed."
     try {
-    Install-Module -Name AzureAD -force
+    Install-Module -Name AzureAD -force -scope CurrentUser
     }
     catch {
         Write-Log -Message "Failed to install the AzureAD module. Please install it manually and re-run the script."
@@ -21,7 +22,7 @@ if (-not (Get-Module -ListAvailable -Name AzureAD)) {
 if (-not (Get-Module -ListAvailable -Name PartnerCenter)) {
     Write-Log -Message "The PartnerCenter module is not installed."
     try {
-    Install-Module -Name PartnerCenter -force
+    Install-Module -Name PartnerCenter -force -scope CurrentUser
     }
     catch {
         Write-Log -Message "Failed to install the PartnerCenter module. Please install it manually and re-run the script."
@@ -33,7 +34,7 @@ if (-not (Get-Module -ListAvailable -Name PartnerCenter)) {
 # ExchangeOnlineManagement
 if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
    try {
-     Install-Module -Name ExchangeOnlineManagement -Force
+     Install-Module -Name ExchangeOnlineManagement -force -scope CurrentUser
    }
    catch {
     Write-Log -Message "Failed to install the ExchangeOnlineManagement module. Please install it manually and re-run the script."
@@ -56,7 +57,6 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Identity.Client)) {
     Write-Log -Message "The Microsoft.Identity.Client module has been installed"
 }
 
-
 # Function to write log messages to the log file
 function Write-Log {
     param (
@@ -73,16 +73,50 @@ $credentials = Get-Credential
 $userName = $credentials.UserName
 
 function Get-PartnerTenants {
+    $exchangeOnlineTenants = @()
     # Authenticate with Partner Center credentials
-    Connect-PartnerCenter
+    try {
+            Connect-PartnerCenter
+    }
+    catch {
+        Write-Log -Message "Failed to connect to Partner Center. Error: $_"
+        Write-Host "Failed to connect to Partner Center. Please check your credentials and try again."
+        return
+    }   
     # Retrieve the customer tenants associated with the partner account and pipe the domain names
-    $customerTenants = Get-PartnerCustomer | Select-Object -ExpandProperty Domain
+    $customerIDs = Get-PartnerCustomer | Select-Object -ExpandProperty CustomerId
+    # Get customer subscriptions and filter based on product names because we only want to look at tenants that have Exchange Online or Microsoft 365 subscriptions.
+    foreach ($id in $customerIDs) {
+        $subscriptions = Get-PartnerCustomerSubscribedSku -CustomerId $id
+        if ($subscriptions.ProductName -match "Exchange Online|Microsoft 365") {
+            Write-Host "Gathering information from $($id) ..."
+            Write-Log -Message "Gathering information from $($id) ..."
+            try {
+                $customerTenants = Get-PartnerCustomer -CustomerId $id | Select-Object -ExpandProperty Domain
+                $exchangeOnlineTenants += $customerTenants
+            }
+            catch {
+               Write-Host "Get-PartnerCustomer function failed for $($id)."
+               Write-Log -Message "Get-PartnerCustomer function failed for $($id)."
+            }
+        }
+        else {
+            $customerTenants = Get-PartnerCustomer -CustomerId $id | Select-Object -ExpandProperty Domain
+            Write-Host "Gathering information from $($id) ..."
+            Write-Host "Skipping '$($customerTenants)' because they do not have any applicable subscriptoins."
+            Write-Log -Message "Skipping '$($customerTenants)' because they do not have any applicable subscriptions."
+        }
+    }
 
     # Disconnect
     Disconnect-PartnerCenter
     # Return the tenant names
-    return $customerTenants
+    return $exchangeOnlineTenants
 }
+
+# Import Necessary Modules
+Import-Module PartnerCenter
+Import-Module ExchangeOnlineManagement
 
 # Call the Get-PartnerTenants function to get the domain names of all partner tenants
 # Position 0 in the array (the partner tenant itself) should be omitted from the foreach loop later
@@ -108,17 +142,22 @@ foreach ($tenantDomain in $tenantDomains) {
         Connect-ExchangeOnline -DelegatedOrganization $tenantDomain -ShowProgress $true -UserPrincipalName $userName
     }
     catch {
-        Write-Log -Message "Could not connect to $($tenantDomain)."
+        Write-Log -Message "$($tenantDomain): Could not connect."
         Write-Host "Could not connect to $($tenantDomain)."
         return
     }
     # Retrieve the existing transport rule, if it exists
-    $existingRule = Get-TransportRule -Identity $ruleName -ErrorAction SilentlyContinue
+    try {
+        $existingRule = Get-TransportRule -Identity $ruleName -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Log -Message "$($tenantDomain): Get-TransportRule cmdlet failed."
+    }
 
     # If the rule already exists...
     if ($existingRule) {
         # Logging: Existing rule found
-        Write-Log -Message "The transport rule '$($ruleName)' already exists. Overwriting with the current safe sender list if it's different."
+        Write-Log -Message "$($tenantDomain): The transport rule '$($ruleName)' already exists. Overwriting with the current safe sender list if it's different."
 
         # Retrieve the existing domain names from the rule
         $existingSafeDomains = $existingRule.SenderDomainIs
@@ -129,27 +168,27 @@ foreach ($tenantDomain in $tenantDomains) {
         # If there are names that weren't already in .SenderDomainIs...
         if ($uniqueSafeDomains) {
             # Logging: Domain names to be added
-            Write-Log -Message "The rules from the source file at $($csvFilePath) are different, so we will invoke Set-TransportRule for '$tenantDomain' and add the following domains to the safe-list:"
+            Write-Log -Message "$($tenantDomain): The rules from 'Safe Domains.CSV' the source file at are different, so we will invoke Set-TransportRule and add the following domains to the safe-list:"
             Write-Log -Message $($newSafeDomains -join ', ')
-            Write-Host "The rules from the source file at $($csvFilePath) are different, so we will invoke Set-TransportRule for '$tenantDomain' and add the following domains to the safe list:"
+            Write-Host "$($tenantDomain): The rules from 'Safe Domains.CSV' the source file at are different, so we will invoke Set-TransportRule and add the following domains to the safe-list:"
             Write-Host $($newSafeDomains -join ', ')
 
             # Set the new rule
             Set-TransportRule -Identity $existingRule.Identity -SenderDomainIs $newSafeDomains
 
             # Logging: Rule updated
-            Write-Log -Message "The transport rule has been updated with the new domain names."
-            Write-Host "The transport rule has been updated with the new domain names."
+            Write-Log -Message "$($tenantDomain): The transport rule has been updated with the new domain names."
+            Write-Host "$($tenantDomain): The transport rule has been updated with the new domain names."
         }
         else {
             # Logging: No new domain names to add
-            Write-Log -Message "No new domain names to add to the transport rule at '$tenantDomain'."
-            Write-Host "No new domain names to add to the transport rule at '$tenantDomain'."
+            Write-Log -Message "$($tenantDomain): No new domain names to add to the transport rule."
+            Write-Host "$($tenantDomain): No new domain names to add to the transport rule."
         }
     }
 
     # If the rule doesn't already exist, let's create it!
-    elseif ($null = $existingrule) {
+    elseif (-not $existingrule) {
         # Make sure the CSV file isn't blank or cannot be found
         if (-not $newSafeDomains) {
             Write-Log -Message "No safe domains found in the CSV file."
@@ -175,9 +214,11 @@ foreach ($tenantDomain in $tenantDomains) {
             -SetHeaderValue "Bypass spam filtering for authenticated sender" `
             -SetSCL -1
 
-        Write-Log -Message "The following domains were added to the Firewell Technology Solutions 'Safe Senders' list at '$tenantDomain' under the rule named '$ruleName':"
+        Write-Log -Message "$($tenantDomain): The following domains were added to the Firewell Technology Solutions 'Safe Senders' list under the rule named '$ruleName':"
         Write-Log -Message $($newSafeDomains -join ', ')
-        Write-Output "The following domains were added to the Firewell Technology Solutions 'Safe Senders' list at '$tenantDomain':"
+        Write-Host "$($tenantDomain): The following domains were added to the Firewell Technology Solutions 'Safe Senders' list under the rule named '$ruleName':"
         Write-Output $($newSafeDomains -join ', ')
     }
 }
+
+Disconnect-ExchangeOnline
