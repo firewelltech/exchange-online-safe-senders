@@ -1,6 +1,4 @@
-﻿Set-PSDebug -Trace 0
-
-# Set the log file path
+﻿# Set the log file path
 $logFilePath = "$PSScriptRoot\log.txt"
 # Set parameters for Connect-ExchangeOnline cmdlet for efficiency (passed to the -CommandName parameter)
 
